@@ -1,0 +1,225 @@
+#include <Servo.h>
+#include <WiFiEspClient.h>
+#include <WiFiEsp.h>
+#include <PubSubClient.h>
+#include "SoftwareSerial.h"
+#include <SimpleDHT.h>
+
+#define WIFI_AP "ESP nie"
+#define WIFI_PASSWORD "1234567890"
+
+IPAddress server(192, 168, 4, 5);
+IPAddress localClient(192, 168, 4, 4);
+
+WiFiEspClient espClient;
+PubSubClient client(server, 1883, espClient); // inisialisasi library ESP 
+
+SoftwareSerial soft(4, 5); // RX, TX
+
+int dht_pin = 6;
+SimpleDHT11 dht(dht_pin);
+int relayPin = 11;
+
+unsigned int status = WL_IDLE_STATUS;
+unsigned long lastSend;
+
+const int vibrationSensorPin = 3; // Vibration Sensor di hubungkan ke Pin 3
+
+const int pinAnalog = A0;//inialisasi pin sensor
+
+const int pinAlarm = 11;//inilasisasi pin alarm
+
+int vibrationSensorState = 0; // Status saat pertama mulai = 0
+
+int indikatorHijau = 8; // Set Pin 3 untuk LED Hijau
+int indikatorMerah = 9; // Set Pin 4 untuk LED Merah
+
+int indikatorBuzzer = 10; // Set Pin 5 untuk Buzzer
+
+int data;//inialisasi variabel data
+
+void setup() {
+  
+  Serial.begin(9600);//set baud rate serial monitor
+
+  soft.begin(9600);// set serial for ESP module
+  WiFi.init(&soft);// set ESP module
+//
+  if (WiFi.status() == WL_NO_SHIELD) {// check for the presence of the shield (set ESP nya)
+    Serial.println(F("WiFi shield not present"));
+    while (true);// don't continue
+  } connectAP();
+//  
+  lastSend = 0;
+  
+  pinMode(vibrationSensorPin, INPUT); // Jadikan Vibration sensor sebagai input
+  pinMode(pinAnalog, INPUT);//inialisasi status I/O pin
+  
+  pinMode(indikatorHijau, OUTPUT); // Jadikan indikatorHijau sebagai Output
+  pinMode(indikatorBuzzer, OUTPUT); // Jadikan indikatorBuzzer sebagai Output
+  pinMode(indikatorMerah, OUTPUT); // Jadikan indikatorMerah sebagai Output
+  
+  pinMode(pinAlarm, OUTPUT);//inialisasi status I/O pin
+  pinMode(relayPin, OUTPUT);
+}
+
+void loop() {
+  
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+  
+  assign_value();
+  delay(1000);
+ 
+}
+
+void assign_value(){
+  bool stat_asap = false;
+  bool stat_getar = false;
+  long curTime = millis();
+
+  // DHT
+  byte temp = 0;
+  byte humidity = 0;
+  int err = SimpleDHTErrSuccess;
+
+  if((err = dht.read(&temp, &humidity, NULL)) != SimpleDHTErrSuccess){
+    Serial.print("Read DHT11 failed, err="); Serial.println(err);delay(1000);
+    return;
+  }
+  // DHT
+  
+  if(getGetaran() > 1000){
+    Serial.println("Getar uy.");
+    stat_getar = true;
+  }
+  if(getAsap() >= 450){
+    Serial.println("Asepnya woy!!!.");
+    stat_asap = true;
+  }
+
+  if(getDHT((int)temp, (int)humidity)){
+    digitalWrite(relayPin, LOW);
+  }else{
+    digitalWrite(relayPin, HIGH);
+  }
+
+  if(stat_asap || stat_getar || getDHT((int)temp, (int)humidity)){
+    send_data(getGetaran(), getAsap(), (int)temp, (int)humidity, curTime);
+  }
+  alert(stat_getar, stat_asap); // menjalakan aksi buzze dan LED
+}
+
+boolean getDHT(int temp, int hum){
+
+  if(temp > 31 && hum < 60){
+    return true;
+  }else if(temp > 31){
+    return true;
+  }else{
+    return false;
+  }
+  
+}
+
+long getGetaran(){
+  vibrationSensorState = digitalRead(vibrationSensorPin);
+  long measurement = getar_val();
+  delay(50);
+
+  return measurement;
+}
+
+long getar_val(){
+  delay(10);
+  long measurement = pulseIn(vibrationSensorPin, HIGH);
+  return measurement;
+}
+
+long getAsap(){
+  data = analogRead(pinAnalog);
+  return data;
+}
+
+void alert(bool getar, bool asap){
+  if(getar && asap){
+    for(int i=0; i<3; i++){
+      digitalWrite(indikatorBuzzer, HIGH);
+      digitalWrite(indikatorHijau, HIGH);
+      digitalWrite(indikatorMerah, HIGH);
+      delay(250);
+  
+      digitalWrite(indikatorBuzzer, LOW);
+      digitalWrite(indikatorHijau, LOW);
+      digitalWrite(indikatorMerah, LOW);
+      delay(250);
+    }
+  }else if(getar && !asap){
+    for(int i=0; i<3; i++){
+      digitalWrite(indikatorBuzzer, HIGH);
+      digitalWrite(indikatorHijau, HIGH);
+      delay(250);
+  
+      digitalWrite(indikatorBuzzer, LOW);
+      digitalWrite(indikatorHijau, LOW);
+      delay(250);
+    }
+  }else if(asap && !getar){
+    for(int i=0; i<3; i++){
+      digitalWrite(indikatorBuzzer, HIGH);
+      digitalWrite(indikatorMerah, HIGH);
+      delay(250);
+  
+      digitalWrite(indikatorBuzzer, LOW);
+      digitalWrite(indikatorMerah, LOW);
+      delay(250);
+    }
+  }else{
+    // do nothing.
+    digitalWrite(indikatorBuzzer, LOW);
+    digitalWrite(indikatorHijau, LOW);
+    digitalWrite(indikatorMerah, LOW);
+  }
+}
+
+void send_data(long getar, float gas, int suhu, int kelembapan, long timestamp){
+  char asaa[256];
+  
+  String final_data = "getar="+String(getar);
+    final_data += "&gas="+String(gas);
+    final_data += "&suhu="+String(suhu);
+    final_data += "&kelembapan="+String(kelembapan);
+    final_data += "&time="+String(timestamp);
+  Serial.println(final_data);
+  final_data.toCharArray(asaa, final_data.length() + 1);
+  Serial.println(final_data.length());
+  
+  client.publish("semut/sensor", asaa);
+}
+
+void connectAP(){
+  // attempt to connect to WiFi network
+  while ( status != WL_CONNECTED) {
+    Serial.print(F("Attempting to connect to WPA SSID: "));
+    Serial.println(WIFI_AP);
+    // Connect to WPA/WPA2 network
+    WiFi.config(localClient);
+    status = WiFi.begin(WIFI_AP, WIFI_PASSWORD);
+    delay(500);
+  }
+}
+
+void reconnect() {
+  while (!client.connected()) {// Loop until we're reconnected
+    Serial.print(F("Connecting to broker .."));
+    if ( client.connect("Node-1") ) {// Attempt to connect (clientId, username, password)
+      Serial.println(F("[DONE]"));
+    } else {
+      Serial.println(F("retrying in 5 seconds]"));
+      delay( 5000 );// Wait 5 seconds before retrying
+    }
+  }
+  Serial.print(client.state());
+}
